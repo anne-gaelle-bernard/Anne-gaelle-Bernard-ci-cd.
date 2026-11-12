@@ -1,0 +1,127 @@
+name: CI/CD
+
+# Déclenchement : push sur main (dev) ou création d'un tag vX.Y.Z (prod)
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # 1. Récupération du code + 2. Exécution des tests
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    outputs:
+      log: ${{ steps.tests.outputs.log }}
+    steps:
+      - name: Récupération du code
+        uses: actions/checkout@v4
+
+      - name: Installation de Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Installation des dépendances
+        run: npm install --no-audit --no-fund
+
+      - name: Lancement des tests
+        id: tests
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee test.log || {
+            {
+              echo 'log<<EOF_LOG'
+              tail -n 40 test.log
+              echo 'EOF_LOG'
+            } >> "$GITHUB_OUTPUT"
+            exit 1
+          }
+
+  # 3. Build + 4. Push de l'image Docker (uniquement si les tests passent)
+  build-push:
+    name: Build & Push Docker
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Récupération du code
+        uses: actions/checkout@v4
+
+      - name: Connexion à GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Calcul des tags de l'image
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            # Développement (branche main)
+            type=raw,value=dev,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,prefix=dev-,enable=${{ github.ref == 'refs/heads/main' }}
+            # Production (tag git v1.2.3)
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') }}
+
+      - name: Build et push de l'image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            APP_ENV=${{ startsWith(github.ref, 'refs/tags/') && 'production' || 'development' }}
+
+  # 5. Notification Google Chat (toujours exécutée, succès ou échec)
+  notify:
+    name: Notification Google Chat
+    needs: [test, build-push]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Envoi de la notification
+        env:
+          WEBHOOK: ${{ secrets.GOOGLE_CHAT_WEBHOOK }}
+          TEST_RESULT: ${{ needs.test.result }}
+          BUILD_RESULT: ${{ needs.build-push.result }}
+          TEST_LOG: ${{ needs.test.outputs.log }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$WEBHOOK" ]; then
+            echo "Secret GOOGLE_CHAT_WEBHOOK manquant" >&2
+            exit 1
+          fi
+
+          if [ "$TEST_RESULT" = "success" ] && [ "$BUILD_RESULT" = "success" ]; then
+            STATUS="✅ SUCCÈS"
+            DETAILS="Image poussée sur ${REGISTRY}/${IMAGE_NAME,,}"
+          else
+            STATUS="❌ ÉCHEC"
+            DETAILS="Raison : Tests = ${TEST_RESULT} | Build/Push = ${BUILD_RESULT}"
+            if [ -n "$TEST_LOG" ]; then
+              DETAILS="${DETAILS}"$'\n'"Logs des tests :"$'\n'"\`\`\`${TEST_LOG}\`\`\`"
+            fi
+          fi
+
+          TEXT="*Pipeline ${GITHUB_WORKFLOW}* : ${STATUS}
+          Dépôt : ${GITHUB_REPOSITORY} (${GITHUB_REF_NAME})
+          Commit : ${GITHUB_SHA::7} par ${GITHUB_ACTOR}
+          Message : ${COMMIT_MSG%%$'\n'*}
+          Détails du run : ${RUN_URL}
+          ${DETAILS}"
+
+          jq -n --arg text "$TEXT" '{text: $text}' \
+            | curl -sS --fail -X POST -H 'Content-Type: application/json; charset=UTF-8' -d @- "$WEBHOOK"
