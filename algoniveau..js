@@ -5,7 +5,8 @@ const resetButton = document.getElementById("resetButton");
 
 let count = parseInt(localStorage.getItem("clickCount")) || 0;
 let clickValue = parseInt(localStorage.getItem("clickValue")) || 1;
-let nextMilestone = Math.ceil(count / 100) * 100;
+// Prochain palier = centaine suivante (0 -> 100, 250 -> 300, 100 -> 200)
+let nextMilestone = (Math.floor(count / 100) + 1) * 100;
 let levelValue = parseInt(localStorage.getItem("levelValue")) || 1;
 
 counterDisplay.textContent = `Nombre d'XP : ${count}`;
