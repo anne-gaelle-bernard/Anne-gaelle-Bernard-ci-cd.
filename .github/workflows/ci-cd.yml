@@ -1,22 +1,45 @@
+# =====================================================================
+#  Pipeline CI/CD du projet MoneyClick
+#
+#  Étapes :  1. Tests  ->  2. Build + push de l'image Docker  ->  3. Notification
+#
+#  - push sur la branche main  => image de DÉVELOPPEMENT (tags : dev, dev-<sha>)
+#  - création d'un tag v1.0.0   => image de PRODUCTION    (tags : 1.0.0, latest)
+# =====================================================================
+
 name: CI/CD
 
-# Déclenchement : push sur main (dev) ou création d'un tag vX.Y.Z (prod)
+# ---------------------------------------------------------------------
+# QUAND la pipeline se lance
+# ---------------------------------------------------------------------
 on:
   push:
-    branches: [main]
-    tags: ['v*']
+    branches: [main]   # à chaque push sur main
+    tags: ['v*']       # à chaque tag qui commence par "v" (ex : v1.0.0)
 
+# ---------------------------------------------------------------------
+# Valeurs utilisables dans tous les jobs
+# vars.XXX = variables GitHub (Settings > Secrets and variables > Actions)
+# "|| 'valeur'" = valeur par défaut si la variable n'existe pas
+# ---------------------------------------------------------------------
 env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  NODE_VERSION: ${{ vars.NODE_VERSION || '20' }}
+  REGISTRY: ${{ vars.REGISTRY || 'ghcr.io' }}
+  IMAGE_NAME: ${{ vars.IMAGE_NAME || github.repository }}
 
 jobs:
-  # 1. Récupération du code + 2. Exécution des tests
+
+  # ===================================================================
+  # JOB 1 : récupérer le code et lancer les tests
+  # ===================================================================
   test:
-    name: Tests
-    runs-on: ubuntu-latest
+    name: 1. Tests
+    runs-on: ubuntu-latest          # machine virtuelle Linux fournie par GitHub
+
+    # On "exporte" le log des tests pour pouvoir l'envoyer dans la notification
     outputs:
       log: ${{ steps.tests.outputs.log }}
+
     steps:
       - name: Récupération du code
         uses: actions/checkout@v4
@@ -24,32 +47,38 @@ jobs:
       - name: Installation de Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: ${{ env.NODE_VERSION }}
 
       - name: Installation des dépendances
-        run: npm install --no-audit --no-fund
+        run: npm install
 
       - name: Lancement des tests
         id: tests
         run: |
+          # On lance les tests et on garde une copie de la sortie dans test.log
           set -o pipefail
-          npm test 2>&1 | tee test.log || {
-            {
-              echo 'log<<EOF_LOG'
-              tail -n 40 test.log
-              echo 'EOF_LOG'
-            } >> "$GITHUB_OUTPUT"
-            exit 1
-          }
+          if ! npm test 2>&1 | tee test.log; then
+            # Échec : on sauvegarde les 40 dernières lignes pour la notification
+            echo "log<<FIN" >> "$GITHUB_OUTPUT"
+            tail -n 40 test.log >> "$GITHUB_OUTPUT"
+            echo "FIN" >> "$GITHUB_OUTPUT"
+            exit 1    # le job échoue -> la pipeline s'arrête ici
+          fi
 
-  # 3. Build + 4. Push de l'image Docker (uniquement si les tests passent)
-  build-push:
-    name: Build & Push Docker
+  # ===================================================================
+  # JOB 2 : construire l'image Docker et la pousser sur GHCR
+  # "needs: test" => ce job ne démarre QUE si les tests ont réussi
+  # ===================================================================
+  docker:
+    name: 2. Build & Push Docker
     needs: test
     runs-on: ubuntu-latest
+
+    # Droit d'écrire dans GitHub Packages (le registre ghcr.io)
     permissions:
       contents: read
       packages: write
+
     steps:
       - name: Récupération du code
         uses: actions/checkout@v4
@@ -59,7 +88,16 @@ jobs:
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.GITHUB_TOKEN }}   # fourni automatiquement par GitHub
+
+      - name: Choix de l'environnement (dev ou prod)
+        id: env
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "app_env=production" >> "$GITHUB_OUTPUT"
+          else
+            echo "app_env=development" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Calcul des tags de l'image
         id: meta
@@ -67,10 +105,10 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            # Développement (branche main)
+            # Branche main -> images de développement
             type=raw,value=dev,enable=${{ github.ref == 'refs/heads/main' }}
             type=sha,prefix=dev-,enable=${{ github.ref == 'refs/heads/main' }}
-            # Production (tag git v1.2.3)
+            # Tag git v1.2.3 -> images de production
             type=semver,pattern={{version}}
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') }}
 
@@ -82,46 +120,52 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            APP_ENV=${{ startsWith(github.ref, 'refs/tags/') && 'production' || 'development' }}
+            APP_ENV=${{ steps.env.outputs.app_env }}
 
-  # 5. Notification Google Chat (toujours exécutée, succès ou échec)
+  # ===================================================================
+  # JOB 3 : notification Google Chat
+  # "if: always()" => s'exécute TOUJOURS, même si un job précédent a échoué
+  # ===================================================================
   notify:
-    name: Notification Google Chat
-    needs: [test, build-push]
+    name: 3. Notification Google Chat
+    needs: [test, docker]
     if: always()
     runs-on: ubuntu-latest
+
     steps:
-      - name: Envoi de la notification
+      - name: Envoi du message
         env:
-          WEBHOOK: ${{ secrets.GOOGLE_CHAT_WEBHOOK }}
-          TEST_RESULT: ${{ needs.test.result }}
-          BUILD_RESULT: ${{ needs.build-push.result }}
+          WEBHOOK: ${{ secrets.GOOGLE_CHAT_WEBHOOK }}   # secret GitHub
+          TEST_RESULT: ${{ needs.test.result }}          # success / failure / skipped
+          DOCKER_RESULT: ${{ needs.docker.result }}
           TEST_LOG: ${{ needs.test.outputs.log }}
           COMMIT_MSG: ${{ github.event.head_commit.message }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          if [ -z "$WEBHOOK" ]; then
-            echo "Secret GOOGLE_CHAT_WEBHOOK manquant" >&2
-            exit 1
-          fi
-
-          if [ "$TEST_RESULT" = "success" ] && [ "$BUILD_RESULT" = "success" ]; then
+          # 1) Statut global
+          if [ "$TEST_RESULT" = "success" ] && [ "$DOCKER_RESULT" = "success" ]; then
             STATUS="✅ SUCCÈS"
-            DETAILS="Image poussée sur ${REGISTRY}/${IMAGE_NAME,,}"
+            DETAILS="Image poussée : ${REGISTRY}/${IMAGE_NAME,,}"
           else
             STATUS="❌ ÉCHEC"
-            DETAILS="Raison : Tests = ${TEST_RESULT} | Build/Push = ${BUILD_RESULT}"
+            DETAILS="Tests : ${TEST_RESULT} | Docker : ${DOCKER_RESULT}"
             if [ -n "$TEST_LOG" ]; then
-              DETAILS="${DETAILS}"$'\n'"Logs des tests :"$'\n'"\`\`\`${TEST_LOG}\`\`\`"
+              DETAILS="${DETAILS}
+          Logs des tests :
+          \`\`\`${TEST_LOG}\`\`\`"
             fi
           fi
 
-          TEXT="*Pipeline ${GITHUB_WORKFLOW}* : ${STATUS}
+          # 2) Texte du message
+          TEXT="*Pipeline CI/CD* : ${STATUS}
           Dépôt : ${GITHUB_REPOSITORY} (${GITHUB_REF_NAME})
           Commit : ${GITHUB_SHA::7} par ${GITHUB_ACTOR}
           Message : ${COMMIT_MSG%%$'\n'*}
-          Détails du run : ${RUN_URL}
+          Détails : ${RUN_URL}
           ${DETAILS}"
 
+          # 3) Envoi vers Google Chat (jq fabrique un JSON valide)
           jq -n --arg text "$TEXT" '{text: $text}' \
-            | curl -sS --fail -X POST -H 'Content-Type: application/json; charset=UTF-8' -d @- "$WEBHOOK"
+            | curl -sS --fail -X POST \
+                -H 'Content-Type: application/json; charset=UTF-8' \
+                -d @- "$WEBHOOK"
