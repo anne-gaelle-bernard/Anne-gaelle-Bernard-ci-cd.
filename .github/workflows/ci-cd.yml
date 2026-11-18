@@ -79,6 +79,10 @@ jobs:
       contents: read
       packages: write
 
+    # On "exporte" le nom final de l'image pour la notification
+    outputs:
+      image: ${{ steps.image.outputs.name }}
+
     steps:
       - name: Récupération du code
         uses: actions/checkout@v4
@@ -99,11 +103,21 @@ jobs:
             echo "app_env=development" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Nom de l'image (format accepté par Docker)
+        id: image
+        run: |
+          # Docker exige des minuscules et refuse un nom qui finit par . - ou _
+          # ex : anne-gaelle-bernard/Anne-gaelle-Bernard-ci-cd.  ->  .../anne-gaelle-bernard-ci-cd
+          NAME="${IMAGE_NAME,,}"
+          NAME=$(echo "$NAME" | sed -E 's/[._-]+$//')
+          echo "name=${REGISTRY}/${NAME}" >> "$GITHUB_OUTPUT"
+          echo "Image : ${REGISTRY}/${NAME}"
+
       - name: Calcul des tags de l'image
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ steps.image.outputs.name }}
           tags: |
             # Branche main -> images de développement
             type=raw,value=dev,enable=${{ github.ref == 'refs/heads/main' }}
@@ -139,13 +153,20 @@ jobs:
           TEST_RESULT: ${{ needs.test.result }}          # success / failure / skipped
           DOCKER_RESULT: ${{ needs.docker.result }}
           TEST_LOG: ${{ needs.test.outputs.log }}
+          IMAGE: ${{ needs.docker.outputs.image }}
           COMMIT_MSG: ${{ github.event.head_commit.message }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          # 0) Le secret doit exister, sinon on explique clairement pourquoi ça échoue
+          if [ -z "$WEBHOOK" ]; then
+            echo "::error::Le secret GOOGLE_CHAT_WEBHOOK est vide ou absent (Settings > Secrets and variables > Actions)"
+            exit 1
+          fi
+
           # 1) Statut global
           if [ "$TEST_RESULT" = "success" ] && [ "$DOCKER_RESULT" = "success" ]; then
             STATUS="✅ SUCCÈS"
-            DETAILS="Image poussée : ${REGISTRY}/${IMAGE_NAME,,}"
+            DETAILS="Image poussée : ${IMAGE}"
           else
             STATUS="❌ ÉCHEC"
             DETAILS="Tests : ${TEST_RESULT} | Docker : ${DOCKER_RESULT}"
