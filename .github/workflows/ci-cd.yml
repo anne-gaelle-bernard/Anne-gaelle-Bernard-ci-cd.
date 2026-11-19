@@ -150,13 +150,40 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
 
+    # Droit de lire les logs des jobs de ce run (pour expliquer un échec)
+    permissions:
+      actions: read
+
     steps:
+      - name: Récupération des logs des jobs en échec
+        id: logs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # On demande à l'API GitHub la liste des jobs du run en cours,
+          # puis, pour chaque job en échec, les 30 dernières lignes de son log.
+          FAILED=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs" \
+            --jq '.jobs[] | select(.conclusion == "failure") | "\(.id) \(.name)"' || true)
+
+          {
+            echo "log<<FIN"
+            while read -r ID NAME; do
+              [ -z "$ID" ] && continue
+              echo "--- ${NAME} ---"
+              # cut retire l'horodatage en début de ligne
+              gh api "repos/${GITHUB_REPOSITORY}/actions/jobs/${ID}/logs" 2>/dev/null \
+                | cut -d' ' -f2- | grep -v '^##\[group\]\|^##\[endgroup\]' | tail -n 30
+            done <<< "$FAILED"
+            echo "FIN"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Envoi du message
         env:
           WEBHOOK: ${{ secrets.GOOGLE_CHAT_WEBHOOK }}   # secret GitHub
           TEST_RESULT: ${{ needs.test.result }}          # success / failure / skipped
           DOCKER_RESULT: ${{ needs.docker.result }}
           TEST_LOG: ${{ needs.test.outputs.log }}
+          FAIL_LOG: ${{ steps.logs.outputs.log }}       # logs de tous les jobs en échec
           IMAGE: ${{ needs.docker.outputs.image }}
           COMMIT_MSG: ${{ github.event.head_commit.message }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -178,10 +205,12 @@ jobs:
           else
             STATUS="❌ ÉCHEC"
             DETAILS="Tests : ${TEST_RESULT} | Docker : ${DOCKER_RESULT}"
-            if [ -n "$TEST_LOG" ]; then
+            # Logs via l'API (tests OU docker) ; sinon, repli sur le log des tests
+            LOG="${FAIL_LOG:-$TEST_LOG}"
+            if [ -n "$LOG" ]; then
               DETAILS="${DETAILS}
-          Logs des tests :
-          \`\`\`${TEST_LOG}\`\`\`"
+          Raison de l'échec :
+          \`\`\`${LOG}\`\`\`"
             fi
           fi
 
