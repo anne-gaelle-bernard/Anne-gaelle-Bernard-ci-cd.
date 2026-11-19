@@ -14,8 +14,10 @@ name: CI/CD
 # ---------------------------------------------------------------------
 on:
   push:
-    branches: [main]   # à chaque push sur main
+    branches: ['**']   # à chaque push, sur N'IMPORTE QUELLE branche
     tags: ['v*']       # à chaque tag qui commence par "v" (ex : v1.0.0)
+# Toutes les branches : tests + notification
+# main et tags v*     : tests + image Docker + notification
 
 # ---------------------------------------------------------------------
 # Valeurs utilisables dans tous les jobs
@@ -72,6 +74,8 @@ jobs:
   docker:
     name: 2. Build & Push Docker
     needs: test
+    # Image uniquement pour main (dev) et les tags v* (prod), pas pour les autres branches
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
 
     # Droit d'écrire dans GitHub Packages (le registre ghcr.io)
@@ -167,6 +171,10 @@ jobs:
           if [ "$TEST_RESULT" = "success" ] && [ "$DOCKER_RESULT" = "success" ]; then
             STATUS="✅ SUCCÈS"
             DETAILS="Image poussée : ${IMAGE}"
+          elif [ "$TEST_RESULT" = "success" ] && [ "$DOCKER_RESULT" = "skipped" ]; then
+            # Autre branche que main : pas d'image, c'est normal
+            STATUS="✅ SUCCÈS (tests)"
+            DETAILS="Tests OK — pas d'image Docker sur la branche ${GITHUB_REF_NAME} (seulement main et tags v*)"
           else
             STATUS="❌ ÉCHEC"
             DETAILS="Tests : ${TEST_RESULT} | Docker : ${DOCKER_RESULT}"

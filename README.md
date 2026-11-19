@@ -4,10 +4,11 @@ Pipeline CI/CD GitHub Actions du jeu **MoneyClick** : tests → build Docker →
 
 ## Déclenchement
 
-| Événement        | Environnement | Tags d'image poussés                      |
-|------------------|---------------|-------------------------------------------|
-| push sur `main`  | `development` | `dev`, `dev-<sha>`                        |
-| tag `vX.Y.Z`     | `production`  | `X.Y.Z`, `latest`                         |
+| Événement                  | Tests | Image Docker                          | Notification |
+|----------------------------|-------|---------------------------------------|--------------|
+| push sur une autre branche | ✅    | –                                     | ✅           |
+| push sur `main`            | ✅    | `development` : `dev`, `dev-<sha>`    | ✅           |
+| tag `vX.Y.Z`               | ✅    | `production` : `X.Y.Z`, `latest`      | ✅           |
 
 ```bash
 git tag v1.0.0 && git push newrepo v1.0.0   # déclenche une release de production
