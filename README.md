@@ -24,7 +24,6 @@ Tout est dans un seul fichier : [.github/workflows/ci-cd.yml](.github/workflows/
 | Variable | `REGISTRY`            | non         | `ghcr.io`           | Registre de conteneurs        |
 | Variable | `IMAGE_NAME`          | non         | `<owner>/<repo>`    | Nom de l'image                |
 
-`GITHUB_TOKEN` est fourni automatiquement par GitHub. Il sert à se connecter à GHCR.
 
 ## Notification Google Chat
 
