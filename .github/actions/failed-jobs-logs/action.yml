@@ -1,0 +1,35 @@
+name: Logs des jobs en échec
+description: Renvoie les 30 dernières lignes du log de chaque job en échec du run en cours
+
+inputs:
+  token:
+    description: Jeton GitHub avec le droit actions:read (ex. secrets.GITHUB_TOKEN)
+    required: true
+
+outputs:
+  log:
+    description: Logs des jobs en échec (vide si aucun)
+    value: ${{ steps.logs.outputs.log }}
+
+runs:
+  using: composite
+  steps:
+    - id: logs
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+      run: |
+        FAILED=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs" \
+          --jq '.jobs[] | select(.conclusion == "failure") | "\(.id) \(.name)"' || true)
+
+        {
+          echo "log<<FIN"
+          while read -r ID NAME; do
+            [ -z "$ID" ] && continue
+            echo "--- ${NAME} ---"
+            # cut retire l'horodatage en début de ligne
+            gh api "repos/${GITHUB_REPOSITORY}/actions/jobs/${ID}/logs" 2>/dev/null \
+              | cut -d' ' -f2- | grep -v '^##\[group\]\|^##\[endgroup\]' | tail -n 30
+          done <<< "$FAILED"
+          echo "FIN"
+        } >> "$GITHUB_OUTPUT"

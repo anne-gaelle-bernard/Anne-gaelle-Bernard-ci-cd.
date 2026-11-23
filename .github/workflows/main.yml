@@ -1,0 +1,50 @@
+
+#   1. Tests  ->  2. Image Docker (GHCR)  ->  3. Déploiement Railway  ->  4. Notification
+
+name: CI/CD  de MoneyClick
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+
+jobs:
+  tests:
+    name: 1. Tests
+    uses: ./.github/workflows/reusable-ci.yml
+
+  docker:
+    name: 2. Docker
+    needs: tests
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/reusable-docker.yml
+    with:
+   
+      image: ghcr.io/anne-gaelle-bernard/anne-gaelle-bernard-ci-cd
+
+  deploy:
+    name: 3. Déploiement Railway
+    needs: docker
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm install --global @railway/cli
+      - run: railway up --ci --project "${{ vars.RAILWAY_PROJECT_ID }}" --service "${{ vars.RAILWAY_SERVICE_ID }}"
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+
+  notify:
+    name: 4. Notification
+    needs: [tests, docker, deploy]
+    if: always()  
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/reusable-notification.yml
+    with:
+      success: ${{ !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
+    secrets:
+      GOOGLE_CHAT_WEBHOOK: ${{ secrets.GOOGLE_CHAT_WEBHOOK }}

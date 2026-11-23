@@ -1,0 +1,41 @@
+name: Notification
+
+on:
+  workflow_call:
+    inputs:
+      success:
+        type: boolean
+        required: true
+    secrets:
+      GOOGLE_CHAT_WEBHOOK:
+        required: true
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: logs
+        if: ${{ !inputs.success }}
+        uses: ./.github/actions/failed-jobs-logs
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - env:
+          WEBHOOK: ${{ secrets.GOOGLE_CHAT_WEBHOOK }}
+          STATUS: ${{ inputs.success && ' SUCCÈS' || ' ÉCHEC' }}
+          LOG: ${{ steps.logs.outputs.log }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          TEXT="*Pipeline CI/CD* : ${STATUS}
+          Branche : ${GITHUB_REF_NAME} — commit ${GITHUB_SHA::7} par ${GITHUB_ACTOR}
+          Détails : ${RUN_URL}"
+          [ -n "$LOG" ] && TEXT="${TEXT}
+          \`\`\`${LOG}\`\`\`"
+
+          jq -n --arg text "$TEXT" '{text: $text}' \
+            | curl -sS --fail -X POST -H 'Content-Type: application/json' -d @- "$WEBHOOK"
